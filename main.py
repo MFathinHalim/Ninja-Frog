@@ -13,8 +13,8 @@ pygame.display.set_caption("Game Fathin")
 WIDTH, HEIGHT = 1000, 800
 FPS = 60
 PLAYER_VEL = 5
-MAX_JUMP_X = 180  # jarak horizontal maksimal
-MIN_GAP_X = 40  # biar gak nempel
+MAX_JUMP_X = 180
+MIN_GAP_X = 40
 
 
 window = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -61,14 +61,14 @@ def get_background(name):
     return tiles, image
 
 
-def draw(window, background, bg_image, player, objects):
+def draw(window, background, bg_image, player, objects, offset_x):
     for tile in background:
         window.blit(bg_image, tile)
 
     for obj in objects:
-        obj.draw(window)
+        obj.draw(window, offset_x)
 
-    player.draw(window)
+    player.draw(window, offset_x)
     pygame.display.update()
 
 
@@ -90,7 +90,8 @@ def handle_vertical_collision(player, objects, dy):
 
 def handle_move(player, objects):
     keys = pygame.key.get_pressed()
-
+    player.on_wall = False
+    player.wall_dir = None
     player.x_vel = 0
     collide_left = collide(player, objects, -PLAYER_VEL * 2)
     collide_right = collide(player, objects, PLAYER_VEL * 2)
@@ -112,17 +113,18 @@ def get_block(size):
 
 
 def collide(player, objects, dx):
-    player.move(dx, 0)
-    player.update()
-    collided_objects = None
+    player.rect.x += dx
+    collided_object = None
+
     for obj in objects:
         if pygame.sprite.collide_mask(player, obj):
-            collided_objects = obj
+            collided_object = obj
+            player.on_wall = True
+            player.wall_dir = "left" if dx < 0 else "right"
             break
 
-    player.move(-dx, 0)
-    player.update()
-    return collided_objects
+    player.rect.x -= dx
+    return collided_object
 
 
 class Player(pygame.sprite.Sprite):
@@ -130,6 +132,8 @@ class Player(pygame.sprite.Sprite):
     GRAVITY = 1
     SPRITES = load_sprite_sheets("MainCharacters", "NinjaFrog", 32, 32, True)
     ANIMATION_DELAY = 3
+    WALL_JUMP_X = 8
+    WALL_JUMP_Y = 10
 
     def __init__(self, x, y, width, height):
         self.rect = pygame.Rect(x, y, width, height)
@@ -140,6 +144,9 @@ class Player(pygame.sprite.Sprite):
         self.animation_count = 0
         self.fall_count = 0
         self.jump_count = 0
+        self.on_wall = False
+        self.wall_stick = False
+        self.wall_dir = None
 
     def jump(self):
         self.y_vel = -self.GRAVITY * 8
@@ -147,6 +154,22 @@ class Player(pygame.sprite.Sprite):
         self.jump_count += 1
         if self.jump_count == 1:
             self.fall_count = 0
+
+    def wall_jump(self):
+        if not self.wall_stick or not self.wall_dir:
+            return
+        # lompat menjauh dari wall
+        if self.wall_dir == "left":
+            self.x_vel = self.WALL_JUMP_X
+            self.direction = "right"
+        elif self.wall_dir == "right":
+            self.x_vel = -self.WALL_JUMP_X
+            self.direction = "left"
+
+        self.y_vel = -self.WALL_JUMP_Y
+        self.wall_stick = False
+        self.fall_count = 0
+        self.jump_count = 1
 
     def landed(self):
         self.fall_count = 0
@@ -174,14 +197,33 @@ class Player(pygame.sprite.Sprite):
             self.animation_count = 0
 
     def loop(self, fps):
-        self.y_vel += min(1, (self.fall_count / fps) * self.GRAVITY)
-        self.move(self.x_vel, self.y_vel)
+        self.wallStick()
 
-        self.fall_count += 1
+        if not self.wall_stick:
+            self.y_vel += min(1, (self.fall_count / fps) * self.GRAVITY)
+            self.fall_count += 1
+        else:
+            self.y_vel = 0
+            self.fall_count = 0
+
+        self.move(self.x_vel, self.y_vel)
+        self.wallStick()
         self.update_sprite()
 
-    def draw(self, win):
-        win.blit(self.sprite, (self.rect.x, self.rect.y))
+    def wallStick(self):
+        keys = pygame.key.get_pressed()
+        self.wall_stick = False
+
+        if self.y_vel < 0:
+            return  # lagi naik, gak boleh nempel
+
+        if self.wall_dir == "left" and keys[pygame.K_a]:
+            self.wall_stick = True
+        elif self.wall_dir == "right" and keys[pygame.K_d]:
+            self.wall_stick = True
+
+    def draw(self, win, offset_x):
+        win.blit(self.sprite, (self.rect.x - offset_x, self.rect.y))
 
     def update_sprite(self):
         sprite_sheet = "idle"
@@ -194,6 +236,12 @@ class Player(pygame.sprite.Sprite):
             sprite_sheet = "fall"
         elif self.x_vel != 0:
             sprite_sheet = "run"
+
+        if self.wall_stick:
+            if self.wall_dir == "left":
+                self.direction = "right"
+            elif self.wall_dir == "right":
+                self.direction = "left"
 
         sprite_sheet_name = sprite_sheet + "_" + self.direction
         sprites = self.SPRITES[sprite_sheet_name]
@@ -216,8 +264,8 @@ class Object(pygame.sprite.Sprite):
         self.height = height
         self.name = name
 
-    def draw(self, win):
-        win.blit(self.image, (self.rect.x, self.rect.y))
+    def draw(self, win, offset_x):
+        win.blit(self.image, (self.rect.x - offset_x, self.rect.y))
 
 
 class Block(Object):
@@ -228,56 +276,30 @@ class Block(Object):
         self.mask = pygame.mask.from_surface(self.image)
 
 
-def generate_vertical_level(start_y, count, block_size, last_center_x, last_dir=None):
-    platforms = []
-    current_y = start_y
-
-    if last_dir is None:
-        last_dir = random.choice([-1, 1])
-
-    MIN_DY = block_size * 1
-    MAX_DY = block_size * 2
-
-    for _ in range(count):
-        length = random.choice([1, 2, 3])
-        platform_width = length * block_size
-        half = platform_width // 2
-
-        # naik Y (selalu masuk akal buat lompat)
-        dy = random.randint(MIN_DY, MAX_DY)
-        current_y -= dy
-
-        # pilih arah tapi BATASI jarak lompat
-        direction = -last_dir if random.random() < 0.35 else last_dir
-
-        max_dx = min(MAX_JUMP_X, block_size * 3)
-        dx = random.randint(block_size, max_dx) * direction
-
-        center_x = last_center_x + dx
-
-        # clamp layar
-        center_x = max(half + 20, min(WIDTH - half - 20, center_x))
-
-        # FINAL ANTI VERTICAL STACK
-        if abs(center_x - last_center_x) < block_size * 1.5:
-            center_x += block_size * direction
-
-        left_x = center_x - half
-
-        for i in range(length):
-            platforms.append(Block(left_x + i * block_size, current_y, block_size))
-
-        last_center_x = center_x
-        last_dir = direction
-
-    return platforms, last_center_x, last_dir
-
-
 def generate_floor(y, block_size):
     floor = []
     for x in range(0, WIDTH, block_size):
         floor.append(Block(x, y, block_size))
     return floor
+
+
+def load_level_from_text(path, block_size):
+    platforms = []
+    player_spawn = [0, 0]
+
+    with open(path, "r") as f:
+        lines = f.read().splitlines()
+
+    for row_index, line in enumerate(lines):
+        for col_index, char in enumerate(line):
+            x = col_index * block_size
+            y = row_index * block_size
+            if char == "M":
+                platforms.append(Block(x, y, block_size))
+            elif char == "P":
+                player_spawn = [x, y]
+
+    return platforms, player_spawn
 
 
 def main(window):
@@ -286,25 +308,16 @@ def main(window):
 
     block_size = 96
 
-    player = Player(WIDTH // 2, HEIGHT - 120, 50, 50)
-
     objects = []
-    last_dir = None
 
-    floor = generate_floor(HEIGHT - block_size, block_size)
-    objects.extend(floor)
-
-    highest = min(objects, key=lambda o: o.rect.y)
-    last_x = highest.rect.centerx
-
-    platforms, last_x, last_dir = generate_vertical_level(
-        start_y=highest.rect.y,
-        count=10,
-        block_size=block_size,
-        last_center_x=last_x,
-        last_dir=last_dir,
+    level_platforms, player_spawn = load_level_from_text(
+        "levels/level1.txt", block_size
     )
-    objects.extend(platforms)
+    player = Player(player_spawn[0], player_spawn[1] - 50, 50, 50)
+
+    objects.extend(level_platforms)
+
+    offset_x = 0
 
     run = True
     while run:
@@ -316,31 +329,17 @@ def main(window):
                 break
 
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE and player.jump_count < 2:
-                    player.jump()
-
+                if event.key == pygame.K_SPACE:
+                    if player.wall_stick:
+                        player.wall_jump()
+                    elif player.jump_count < 2:
+                        player.jump()
         player.loop(FPS)
         handle_move(player, objects)
-        if player.rect.top <= HEIGHT // 3:
-            diff = HEIGHT // 3 - player.rect.top
-            player.rect.top = HEIGHT // 3
-
-            for obj in objects:
-                obj.rect.y += diff
-
-        draw(window, background, bg_image, player, objects)
+        draw(window, background, bg_image, player, objects, offset_x)
+        target_offset_x = player.rect.centerx - WIDTH // 2
+        offset_x += (target_offset_x - offset_x) * 0.1
         objects = [o for o in objects if o.rect.top < HEIGHT + 100]
-
-        if len(objects) < 40:
-            highest = min(objects, key=lambda o: o.rect.y)
-            new_platforms, last_x, last_dir = generate_vertical_level(
-                start_y=highest.rect.y,
-                count=10,
-                block_size=block_size,
-                last_center_x=last_x,
-                last_dir=last_dir,
-            )
-            objects.extend(new_platforms)
 
     pygame.quit()
     quit()
